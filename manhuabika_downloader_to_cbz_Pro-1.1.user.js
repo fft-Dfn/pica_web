@@ -1,248 +1,354 @@
 // ==UserScript==
 // @name         manhuabika_downloader_to_cbz_Pro
 // @namespace    http://tampermonkey.net/
-// @version      1.1
-// @description  纯视觉提取版：修复SPA路由导致面板不显示，重回右上角，彻底无视防爬虫，SPA 强制挂载：我加入了一个“全天候巡逻队”，它会每秒钟盯着地址栏看。只要发现你进入了 /reader/（阅读页），不管网页刷没刷新，都会强行把悬浮面板“拍”在右上角！
-// @author       User
+// @version      1.0
+// @description  完美绝杀版：原生 Fetch 接管 API 绕过预检，彻底解决空数据与熟肉问题
+// @author       User (逆向工程)
 // @match        https://manhuabika.com/comic/*
 // @grant        GM_xmlhttpRequest
 // @connect      *
 // @require      https://unpkg.com/fflate@0.8.2/umd/index.js
+// @require      https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js
+// @run-at       document-start
 // ==/UserScript==
 
 (function() {
     'use strict';
-    /* global fflate */
+    /* global fflate, CryptoJS */
 
     const CONCURRENCY = 3;
-    let imageLibrary = new Set();
-    let chapterName = "Chapter";
-    let isExtracting = false;
 
-    // --- 1. 全天候无声扫描器 (仅在阅读页生效) ---
-    setInterval(() => {
-        // 如果不在阅读页，直接罢工并清空缓存
-        if (!window.location.pathname.includes('/reader/')) {
-            imageLibrary.clear();
-            return;
-        }
+    let capturedToken = "";
+    let capturedHeaders = {};
+    let capturedApiDomain = "https://picaapi.go2778.com"; // 默认兜底域名
 
-        // 只要在阅读页，就开始无情地抠图片
-        document.querySelectorAll('img, [data-src], [data-original]').forEach(el => {
-            let src = el.getAttribute('data-original') || el.getAttribute('data-src') || el.src;
-            if (!src || src.startsWith('data:image')) return;
+    // ★ 间谍武器：拦截 Fetch/XHR，精准窃取 Token 和 动态域名
+    const injectInterceptor = () => {
+        const code = `
+            (function() {
+                const sendData = (headers, url) => {
+                    window.postMessage({ 
+                        type: 'PICA_STEALER', 
+                        headers: JSON.parse(JSON.stringify(headers)),
+                        url: url
+                    }, '*');
+                };
 
-            const lowerSrc = src.toLowerCase();
-            if (lowerSrc.includes('storage') || lowerSrc.includes('tobeimg') || lowerSrc.includes('picacomic')) {
-                imageLibrary.add(src);
-            } else {
-                let rect = el.getBoundingClientRect();
-                if ((rect.width > 200 || rect.height > 200) && !lowerSrc.includes('avatar') && !lowerSrc.includes('logo')) {
-                    imageLibrary.add(src);
-                }
-            }
-        });
+                const origOpen = XMLHttpRequest.prototype.open;
+                XMLHttpRequest.prototype.open = function(method, url) {
+                    this._reqUrl = url;
+                    return origOpen.apply(this, arguments);
+                };
 
-        // 实时更新右上角按钮状态
-        const packBtn = document.getElementById('gemini-pack-btn');
-        if (packBtn && !isExtracting && imageLibrary.size > 0) {
-            packBtn.innerText = `2. 打包当前发现的 ${imageLibrary.size} 张图`;
-            packBtn.classList.add('ready');
-        }
-    }, 1000);
+                const origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+                XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+                    this._headers = this._headers || {};
+                    this._headers[name.toLowerCase()] = value;
+                    if (name.toLowerCase() === 'authorization') sendData(this._headers, this._reqUrl);
+                    return origSetHeader.apply(this, arguments);
+                };
 
-    // --- 2. 强制UI注入守护神 (解决SPA单页应用不刷新的问题) ---
-    setInterval(() => {
-        const isReaderPage = window.location.pathname.includes('/reader/');
-        const panel = document.getElementById('gemini-floating-panel');
-
-        // 如果不在阅读页，但面板存在，就隐藏它
-        if (!isReaderPage) {
-            if (panel) panel.style.display = 'none';
-            return;
-        }
-
-        // 如果在阅读页，且面板已经存在，显示出来即可
-        if (panel) {
-            panel.style.display = 'flex';
-
-            // 顺手提取一下章节名
-            if (chapterName === "Chapter") {
-                const titleEl = document.querySelector('h1') || document.querySelector('.comic-title');
-                if (titleEl) chapterName = (titleEl.innerText || titleEl.textContent).split('-')[0].trim();
-            }
-            return;
-        }
-
-        // --- 开始构建右上角悬浮面板 ---
-        const style = document.createElement('style');
-        style.innerHTML = `
-            #gemini-floating-panel {
-                position: fixed;
-                top: 20px; /* 遵照要求：改回右上角 */
-                right: 20px;
-                z-index: 999999;
-                background: rgba(25, 30, 36, 0.95);
-                padding: 15px;
-                border-radius: 8px;
-                box-shadow: 0 8px 20px rgba(0,0,0,0.6);
-                display: flex;
-                flex-direction: column;
-                gap: 12px;
-                border: 1px solid #444;
-            }
-            .gemini-btn {
-                padding: 12px 15px;
-                background-color: #457b9d;
-                color: white;
-                border-radius: 6px;
-                cursor: pointer;
-                font-size: 14px;
-                border: none;
-                font-weight: bold;
-                transition: all 0.2s ease;
-                text-align: center;
-                box-shadow: 0 2px 5px rgba(0,0,0,0.2);
-            }
-            .gemini-btn:hover { background-color: #1d3557; transform: translateY(-1px); }
-            .gemini-btn.ready { background-color: #e63946; }
-            .gemini-btn.ready:hover { background-color: #d62828; }
-            .gemini-btn.loading { background-color: #fca311; cursor: wait; pointer-events: none; }
-            .gemini-btn.success { background-color: #2a9d8f; }
-            .gemini-tips { color: #ccc; font-size: 12px; max-width: 200px; line-height: 1.5; margin-top: 5px; }
-        `;
-        document.body.appendChild(style);
-
-        const newPanel = document.createElement('div');
-        newPanel.id = 'gemini-floating-panel';
-
-        const scrollBtn = document.createElement('button');
-        scrollBtn.id = 'gemini-scroll-btn';
-        scrollBtn.className = 'gemini-btn';
-        scrollBtn.innerText = '1. 自动滚屏 (破解懒加载)';
-
-        const packBtn = document.createElement('button');
-        packBtn.id = 'gemini-pack-btn';
-        packBtn.className = 'gemini-btn';
-        packBtn.innerText = '2. 等待提取图片...';
-
-        const tips = document.createElement('div');
-        tips.className = 'gemini-tips';
-        tips.innerText = '原理：所见即所得。请确保所有图片都滑过一遍再点击打包。';
-
-        newPanel.appendChild(scrollBtn);
-        newPanel.appendChild(packBtn);
-        newPanel.appendChild(tips);
-        document.body.appendChild(newPanel);
-
-        // --- 绑定按钮事件 ---
-        scrollBtn.onclick = async () => {
-            if (scrollBtn.classList.contains('loading')) return;
-            scrollBtn.innerText = '正在自动滑翔...';
-            scrollBtn.classList.add('loading');
-
-            // 寻找包含内容最多的滚动容器
-            let scrollTarget = document.scrollingElement || document.body;
-            let maxScrollHeight = scrollTarget.scrollHeight;
-
-            document.querySelectorAll('div').forEach(el => {
-                if (el.scrollHeight > maxScrollHeight) {
-                    const overflowY = window.getComputedStyle(el).overflowY;
-                    if (overflowY === 'auto' || overflowY === 'scroll') {
-                        maxScrollHeight = el.scrollHeight;
-                        scrollTarget = el;
+                const origFetch = window.fetch;
+                window.fetch = async function(...args) {
+                    const reqUrl = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url ? args[0].url : '');
+                    const opts = args[1] || {};
+                    const headers = opts.headers || {};
+                    let extracted = {};
+                    if (headers instanceof Headers) {
+                        headers.forEach((v, k) => extracted[k.toLowerCase()] = v);
+                    } else if (Array.isArray(headers)) {
+                        headers.forEach(h => extracted[h[0].toLowerCase()] = h[1]);
+                    } else {
+                        for (let k in headers) extracted[k.toLowerCase()] = headers[k];
                     }
+                    if (extracted['authorization']) sendData(extracted, reqUrl);
+                    return origFetch.apply(this, args);
+                };
+            })();
+        `;
+        const script = document.createElement('script');
+        script.textContent = code;
+        document.documentElement.appendChild(script);
+        script.remove();
+    };
+    injectInterceptor();
+
+    window.addEventListener('message', (e) => {
+        if (e.data && e.data.type === 'PICA_STEALER') {
+            const h = e.data.headers;
+            const url = e.data.url;
+            
+            if (h['authorization']) capturedToken = h['authorization'];
+            if (h['app-channel']) capturedHeaders['app-channel'] = h['app-channel'];
+            if (h['app-platform']) capturedHeaders['app-platform'] = h['app-platform'];
+            if (h['app-uuid']) capturedHeaders['app-uuid'] = h['app-uuid'];
+            if (h['app-version']) capturedHeaders['app-version'] = h['app-version'];
+
+            // 锁定真实 API 域名
+            if (url && url.includes('/comics/')) {
+                const match = url.match(/^https?:\/\/[^\/]+/);
+                if (match) capturedApiDomain = match[0];
+            }
+        }
+    });
+
+    window.addEventListener('DOMContentLoaded', () => {
+        const findToken = (storage) => {
+            for (let i = 0; i < storage.length; i++) {
+                let key = storage.key(i);
+                let val = storage.getItem(key);
+                if (val && typeof val === 'string' && val.includes('eyJhbGciOi')) {
+                    return val.replace(/["']/g, ''); 
                 }
+            }
+            return null;
+        };
+        if (!capturedToken) capturedToken = findToken(localStorage) || findToken(sessionStorage) || "";
+        
+        setTimeout(injectButtons, 1500);
+        const observer = new MutationObserver(injectButtons);
+        observer.observe(document.body, { childList: true, subtree: true });
+    });
+
+    // --- 签名防伪算法 ---
+    function getNonce() {
+        const possible = "abcdefghijklmnopqrstuvwxyz0123456789";
+        let text = "";
+        for (let i = 0; i < 32; i++) text += possible.charAt(Math.floor(Math.random() * possible.length));
+        return text;
+    }
+
+    function createPicaSignature(urlPath, method, time, nonce) {
+        const apiKey = "C69BAF41DA5ABD1FFEDC6D2FEA56B";
+        const apiSecret = "~d}$Q7$eIniTce^F'GzGSRRoPPJxgfRo2ej536ewOmF}Aqk]q^Nzy[Zg,n#Q";
+        let raw = urlPath + time + nonce + method + apiKey;
+        let hash = CryptoJS.HmacSHA256(raw.toLowerCase(), apiSecret);
+        return CryptoJS.enc.Hex.stringify(hash);
+    }
+
+    // --- UI 注入逻辑 ---
+    const style = document.createElement('style');
+    style.innerHTML = `
+        .download-btn {
+            margin: 5px 0 5px 10px;
+            padding: 4px 10px;
+            background-color: #e63946;
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            border: none;
+            display: inline-block;
+            transition: background-color 0.2s;
+        }
+        .download-btn:hover { background-color: #d62828; }
+        .download-btn.loading { background-color: #fca311; cursor: wait; }
+        .download-btn.error { background-color: #457b9d; }
+        .download-btn.success { background-color: #2a9d8f; }
+    `;
+    if(document.head) document.head.appendChild(style);
+    else document.documentElement.appendChild(style);
+
+    function injectButtons() {
+        if (window.location.pathname.includes('/reader/')) return;
+
+        const mangaName = document.querySelector('h1')?.innerText.trim() || document.title.split('-')[0].trim() || 'Manga';
+        const chapterButtons = document.querySelectorAll('.chapter-grid-button, .chapter-list-button, .chapter-item a');
+
+        chapterButtons.forEach(btn => {
+            if (btn.dataset.hasDownloadBtn) return;
+            btn.dataset.hasDownloadBtn = "true";
+
+            const downloadBtn = document.createElement('button');
+            downloadBtn.className = 'download-btn';
+            downloadBtn.innerText = '破解下载';
+
+            downloadBtn.onclick = async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+
+                if (!capturedToken) {
+                    alert("还未偷取到网站令牌！\n请等网页完全加载完毕（或点击任意章节进去看一眼图片再返回）让脚本完成拦截。");
+                    return;
+                }
+                
+                const paths = window.location.pathname.split('/').filter(Boolean);
+                const comicId = paths[paths.length - 1];
+
+                // 完美提取章节名，无视角标，支持熟肉等纯汉字
+                let chapterTitleRaw = "";
+                btn.childNodes.forEach(n => {
+                    if (n.nodeType === Node.TEXT_NODE) chapterTitleRaw += n.textContent;
+                });
+                chapterTitleRaw = chapterTitleRaw.trim() || btn.innerText.split('\n')[0].trim();
+                
+                startDownload(comicId, chapterTitleRaw, mangaName, downloadBtn);
+            };
+
+            btn.parentNode.insertBefore(downloadBtn, btn.nextSibling);
+        });
+    }
+
+    // ★ 三级智能雷达：精准定位章节真实 Order
+    async function getRealOrder(comicId, chapterTitleRaw) {
+        let page = 1;
+        let totalPages = 1;
+        
+        const targetNumMatch = chapterTitleRaw.match(/[\d.]+/);
+        const targetNum = targetNumMatch ? targetNumMatch[0] : null;
+
+        while (page <= totalPages) {
+            const urlPath = `comics/${comicId}/eps?page=${page}`;
+            const json = await fetchJsonAPI(urlPath);
+            
+            if (!json.data || !json.data.eps) throw new Error("获取目录被阻截:" + JSON.stringify(json).substring(0, 30));
+            
+            totalPages = json.data.eps.pages;
+            const docs = json.data.eps.docs;
+            
+            // 策略1：字面完全或包含匹配（适用于“熟肉”）
+            let found = docs.find(d => d.title.trim() === chapterTitleRaw || chapterTitleRaw.includes(d.title.trim()) || d.title.trim().includes(chapterTitleRaw));
+            if (found) return found.order; 
+            
+            // 策略2：数字内核匹配（应对繁简体差异）
+            if (targetNum) {
+                found = docs.find(d => {
+                    const dNum = d.title.match(/[\d.]+/);
+                    return dNum && dNum[0] === targetNum;
+                });
+                if (found) return found.order;
+            }
+            page++;
+        }
+        
+        // 策略3：降级盲猜
+        if (targetNum) return parseInt(targetNum);
+        throw new Error("整个数据库找不到章节且无数字: " + chapterTitleRaw);
+    }
+
+    async function startDownload(comicId, chapterName, mangaName, btn) {
+        if (btn.classList.contains('loading')) return;
+
+        try {
+            updateBtn(btn, '正在定位序号...', 'loading');
+            
+            const realOrder = await getRealOrder(comicId, chapterName);
+            console.log(`[雷达定位成功] 章节 "${chapterName}" 的真实 Order 是: ${realOrder}`);
+
+            updateBtn(btn, '正在拉取图片...', 'loading');
+            let allImageUrls = [];
+            const basePath = `comics/${comicId}/order/${realOrder}/pages`;
+
+            const page1Data = await fetchJsonAPI(`${basePath}?page=1`);
+            if (!page1Data.data || !page1Data.data.pages) throw new Error("API返回无数据:" + JSON.stringify(page1Data).substring(0, 30));
+
+            const totalPages = page1Data.data.pages.pages || 1;
+            const totalImages = page1Data.data.pages.total || 0;
+
+            const extractUrls = (docs) => {
+                return docs.map(doc => {
+                    if (!doc.media) return null;
+                    const fs = doc.media.fileServer || 'https://storage-b.picacomic.com';
+                    const path = doc.media.path || '';
+                    if (!path) return null;
+                    return path.startsWith('http') ? path : `${fs}/${path}`;
+                }).filter(Boolean);
+            };
+
+            allImageUrls.push(...extractUrls(page1Data.data.pages.docs));
+
+            for (let p = 2; p <= totalPages; p++) {
+                updateBtn(btn, `破解分页 ${p}/${totalPages}...`, 'loading');
+                const pageData = await fetchJsonAPI(`${basePath}?page=${p}`);
+                allImageUrls.push(...extractUrls(pageData.data.pages.docs));
+            }
+
+            if (allImageUrls.length === 0) throw new Error('提取到的图片URL为空');
+            
+            const zipFiles = {}; 
+            let downloadedCount = 0;
+            const total = allImageUrls.length;
+
+            await asyncPool(CONCURRENCY, allImageUrls, async (url, index) => {
+                const ext = url.split('.').pop().split('?')[0] || 'jpg';
+                const fileName = `${String(index + 1).padStart(3, '0')}.${ext}`;
+                
+                const arrayBuffer = await fetchImageBuffer(url);
+                zipFiles[fileName] = new Uint8Array(arrayBuffer);
+                
+                downloadedCount++;
+                updateBtn(btn, `抓取 [${downloadedCount}/${total}]`, 'loading');
             });
 
-            let lastTop = -1;
-            let noChangeCount = 0;
+            updateBtn(btn, '打包中...', 'loading');
+            const outBuffer = fflate.zipSync(zipFiles, { level: 0 });
+            const finalBlob = new Blob([outBuffer], { type: "application/zip" });
+            const fullFileName = `${mangaName}_${chapterName}.cbz`;
+            
+            saveAs(finalBlob, fullFileName);
+            updateBtn(btn, '完成', 'success');
+            setTimeout(() => updateBtn(btn, '破解下载', ''), 3000);
+            
+        } catch (err) {
+            console.error('[破解失败详细日志]', err);
+            const errorMsg = typeof err === 'string' ? err : (err.message || '未知错误');
+            updateBtn(btn, `失败: ${errorMsg.substring(0, 15)}...`, 'error');
+            alert(`下载失败详情:\n${errorMsg}`);
+        }
+    }
 
-            let timer = setInterval(() => {
-                let step = window.innerHeight * 0.7; // 每次滚动大半屏
-                scrollTarget.scrollTop += step;
-                window.scrollBy(0, step);
+    function updateBtn(btn, text, statusClass) {
+        btn.innerText = text;
+        btn.className = `download-btn ${statusClass}`;
+    }
 
-                let currentTop = scrollTarget.scrollTop || window.scrollY;
+    // ★ 终极升级：使用原生 Fetch 获取 JSON，完美处理 OPTIONS 预检
+    async function fetchJsonAPI(urlPath) {
+        const time = Math.floor(Date.now() / 1000).toString();
+        const nonce = getNonce();
+        const method = "GET";
+        const signature = createPicaSignature(urlPath, method, time, nonce);
+        const fullUrl = `${capturedApiDomain}/${urlPath}`;
 
-                if (currentTop === lastTop) {
-                    noChangeCount++;
-                    if (noChangeCount >= 4) {
-                        clearInterval(timer);
-                        scrollTarget.scrollTop = 0;
-                        window.scrollTo(0,0);
-                        scrollBtn.innerText = '滚动完成, 请打包';
-                        scrollBtn.className = 'gemini-btn success';
-                    }
-                } else {
-                    noChangeCount = 0;
-                    lastTop = currentTop;
-                }
-            }, 600); // 留出时间给图片加载
-        };
+        const headers = new Headers();
+        headers.append("accept", "application/vnd.picacomic.com.v1+json");
+        headers.append("authorization", capturedToken);
+        headers.append("time", time);
+        headers.append("nonce", nonce);
+        headers.append("signature", signature);
+        headers.append("app-channel", capturedHeaders["app-channel"] || "1");
+        headers.append("app-platform", capturedHeaders["app-platform"] || "android");
+        headers.append("app-uuid", capturedHeaders["app-uuid"] || "webUUIDv2");
+        headers.append("app-version", capturedHeaders["app-version"] || "20251017");
 
-        packBtn.onclick = async () => {
-            if (packBtn.classList.contains('loading')) return;
-            if (imageLibrary.size === 0) {
-                alert("还没提取到任何漫画图片！\n请先往下滚动网页，或者点击【自动滚屏】。");
-                return;
-            }
+        const response = await window.fetch(fullUrl, {
+            method: "GET",
+            headers: headers,
+            mode: "cors"
+        });
 
-            isExtracting = true;
-            packBtn.className = 'gemini-btn loading';
-            packBtn.innerText = '开始极速抓取...';
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
 
-            const urls = Array.from(imageLibrary);
-            const zipFiles = {};
-            let downloadedCount = 0;
-            const total = urls.length;
+        const json = await response.json();
+        if (json.code && json.code !== 200) {
+            throw new Error(`API报错(Code:${json.code}): ${json.message}`);
+        }
+        if (!json.data) {
+            throw new Error(`异常结构: ${JSON.stringify(json)}`);
+        }
+        return json;
+    }
 
-            try {
-                await asyncPool(CONCURRENCY, urls, async (url, index) => {
-                    const ext = url.split('.').pop().split('?')[0] || 'jpg';
-                    const fileName = `${String(index + 1).padStart(3, '0')}.${ext}`;
-
-                    const arrayBuffer = await fetchImageBuffer(url);
-                    zipFiles[fileName] = new Uint8Array(arrayBuffer);
-
-                    downloadedCount++;
-                    packBtn.innerText = `抓取 [${downloadedCount}/${total}]`;
-                });
-
-                packBtn.innerText = '正在无损压缩...';
-                const outBuffer = fflate.zipSync(zipFiles, { level: 0 });
-                const finalBlob = new Blob([outBuffer], { type: "application/zip" });
-
-                saveAs(finalBlob, `${chapterName}.cbz`);
-
-                packBtn.className = 'gemini-btn success';
-                packBtn.innerText = '打包完成！';
-
-                setTimeout(() => {
-                    isExtracting = false;
-                    packBtn.className = 'gemini-btn ready';
-                    packBtn.innerText = `再次打包 (${total}张)`;
-                }, 4000);
-
-            } catch (err) {
-                console.error("下载出错", err);
-                isExtracting = false;
-                packBtn.className = 'gemini-btn';
-                packBtn.style.backgroundColor = '#457b9d';
-                packBtn.innerText = '网络抖动，请重试';
-            }
-        };
-
-    }, 1000); // 每秒检查一次是否需要注入UI
-
-    // --- 底层网络与文件工具 ---
+    // 跨域获取图片依旧使用 GM_xmlhttpRequest，绕过图床防盗链
     function fetchImageBuffer(url) {
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: "GET",
                 url: url,
                 headers: { "Referer": window.location.origin + "/" },
-                responseType: "arraybuffer",
+                responseType: "arraybuffer", 
                 timeout: 20000,
                 onload: (res) => {
                     if (res.status === 200) resolve(res.response);
@@ -261,7 +367,10 @@
         a.download = fileName;
         document.body.appendChild(a);
         a.click();
-        setTimeout(() => { document.body.removeChild(a); window.URL.revokeObjectURL(url); }, 1000);
+        setTimeout(() => {
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+        }, 1000);
     }
 
     async function asyncPool(poolLimit, array, iteratorFn) {
