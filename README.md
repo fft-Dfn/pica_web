@@ -1,2 +1,4 @@
 # pica_web
-based on Picaweb
+based on tampermonkey
+use in Pica web
+
